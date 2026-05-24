@@ -1,0 +1,652 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+import urllib
+
+from sqlalchemy import create_engine
+import pyodbc
+
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import (
+    RandomForestRegressor,
+    GradientBoostingRegressor,
+    ExtraTreesRegressor
+)
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+warnings.filterwarnings("ignore")
+sns.set_theme(style="whitegrid")
+
+
+# =========================================================
+# KẾT NỐI SQL SERVER
+# =========================================================
+
+SERVER_NAME = r".\SQLEXPRESS"
+DATABASE_NAME = "khdl_project"
+SQL_USER = "sa"
+SQL_PASSWORD = "123456"
+
+
+# Kết nối bằng SQLAlchemy, dùng cho pandas read_sql
+params = urllib.parse.quote_plus(
+    f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+    f"SERVER={SERVER_NAME};"
+    f"DATABASE={DATABASE_NAME};"
+    f"UID={SQL_USER};"
+    f"PWD={SQL_PASSWORD};"
+)
+
+engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
+
+# Kết nối bằng pyodbc, dùng cho phần đọc bảng RFM
+conn_str = (
+    "Driver={SQL Server};"
+    f"Server={SERVER_NAME};"
+    f"Database={DATABASE_NAME};"
+    f"UID={SQL_USER};"
+    f"PWD={SQL_PASSWORD};"
+)
+
+
+# =========================================================
+# PHẦN 1: EDA
+# =========================================================
+
+print("\n" + "=" * 70)
+print("PHẦN 1 - NGƯỜI 1: EDA")
+print("=" * 70)
+
+query_eda = """
+SELECT 
+    t.transaction_id, 
+    t.date, 
+    t.customer_id, 
+    c.age, 
+    p.category, 
+    t.payment_method, 
+    t.total_sale_amount, 
+    t.return_status 
+FROM dbo.Transactions t
+JOIN dbo.Customers c ON t.customer_id = c.customer_id
+JOIN dbo.Products p ON t.product_id = p.product_id;
+"""
+
+try:
+    df_eda = pd.read_sql(query_eda, engine)
+    df_eda["date"] = pd.to_datetime(df_eda["date"])
+    print(f"-> Đã đọc thành công {len(df_eda)} dòng dữ liệu giao dịch.")
+except Exception as e:
+    print("Lỗi khi đọc dữ liệu EDA từ SQL:", e)
+    exit()
+
+
+# ---------------------------------------------------------
+# 1.1. Thống kê tổng quan
+# ---------------------------------------------------------
+
+total_transactions = df_eda["transaction_id"].nunique()
+total_customers = df_eda["customer_id"].nunique()
+total_revenue = df_eda["total_sale_amount"].sum()
+
+print("\n===== THỐNG KÊ TỔNG QUAN =====")
+print(f"Tổng số giao dịch: {total_transactions}")
+print(f"Tổng số khách hàng: {total_customers}")
+print(f"Tổng doanh thu: {total_revenue:,.2f}")
+
+summary_df = pd.DataFrame({
+    "Chỉ số": ["Số giao dịch", "Số khách hàng", "Tổng doanh thu"],
+    "Giá trị": [total_transactions, total_customers, round(total_revenue, 2)]
+})
+
+print("\nBảng thống kê tổng quan:")
+print(summary_df)
+
+
+# ---------------------------------------------------------
+# 1.2. Biểu đồ EDA 1: Số lượng giao dịch và khách hàng
+# ---------------------------------------------------------
+
+overview_df = pd.DataFrame({
+    "Chỉ số": ["Số giao dịch", "Số khách hàng"],
+    "Số lượng": [total_transactions, total_customers]
+})
+
+plt.figure(figsize=(7, 4))
+sns.barplot(
+    data=overview_df,
+    x="Chỉ số",
+    y="Số lượng"
+)
+plt.title("Số lượng giao dịch và số lượng khách hàng", fontsize=14, fontweight="bold")
+plt.xlabel("")
+plt.ylabel("Số lượng")
+plt.tight_layout()
+plt.show()
+
+
+# ---------------------------------------------------------
+# 1.3. Biểu đồ EDA 2: Returned / Not Returned
+# ---------------------------------------------------------
+
+plt.figure(figsize=(7, 4))
+sns.countplot(
+    data=df_eda,
+    x="return_status"
+)
+plt.title("Phân bố trạng thái giao dịch", fontsize=14, fontweight="bold")
+plt.xlabel("Trạng thái giao dịch")
+plt.ylabel("Số lượng giao dịch")
+plt.tight_layout()
+plt.show()
+
+
+# ---------------------------------------------------------
+# 1.4. Biểu đồ EDA 3: Doanh thu theo thời gian
+# ---------------------------------------------------------
+
+revenue_by_date = (
+    df_eda.groupby(df_eda["date"].dt.to_period("M"))["total_sale_amount"]
+    .sum()
+    .reset_index()
+)
+
+revenue_by_date["date"] = revenue_by_date["date"].astype(str)
+
+plt.figure(figsize=(10, 5))
+sns.lineplot(
+    data=revenue_by_date,
+    x="date",
+    y="total_sale_amount",
+    marker="o"
+)
+plt.title("Doanh thu theo thời gian", fontsize=14, fontweight="bold")
+plt.xlabel("Thời gian")
+plt.ylabel("Tổng doanh thu ($)")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+
+# ---------------------------------------------------------
+# 1.5. Biểu đồ EDA 4: Doanh thu theo danh mục sản phẩm
+# ---------------------------------------------------------
+
+sales_by_category = (
+    df_eda.groupby("category")["total_sale_amount"]
+    .sum()
+    .reset_index()
+    .sort_values(by="total_sale_amount", ascending=False)
+)
+
+plt.figure(figsize=(8, 5))
+sns.barplot(
+    data=sales_by_category,
+    x="category",
+    y="total_sale_amount"
+)
+plt.title("Tổng doanh thu theo danh mục sản phẩm", fontsize=14, fontweight="bold")
+plt.xlabel("Danh mục sản phẩm")
+plt.ylabel("Tổng doanh thu ($)")
+plt.xticks(rotation=20)
+plt.tight_layout()
+plt.show()
+
+
+# ---------------------------------------------------------
+# 1.6. Biểu đồ EDA 5: Hành vi mua hàng của khách hàng
+# ---------------------------------------------------------
+
+purchase_frequency = (
+    df_eda.groupby("customer_id")["transaction_id"]
+    .nunique()
+    .reset_index()
+)
+
+purchase_frequency.columns = ["customer_id", "purchase_count"]
+
+plt.figure(figsize=(8, 5))
+sns.histplot(
+    purchase_frequency["purchase_count"],
+    bins=20,
+    kde=False
+)
+plt.title("Phân bố số lần mua của khách hàng", fontsize=14, fontweight="bold")
+plt.xlabel("Số lần mua")
+plt.ylabel("Số lượng khách hàng")
+plt.tight_layout()
+plt.show()
+
+
+# ---------------------------------------------------------
+# 1.7. Biểu đồ bổ sung: Phân phối độ tuổi
+# ---------------------------------------------------------
+
+plt.figure(figsize=(8, 5))
+sns.histplot(
+    df_eda["age"],
+    bins=20,
+    kde=True
+)
+plt.title("Phân phối độ tuổi khách hàng", fontsize=14, fontweight="bold")
+plt.xlabel("Độ tuổi")
+plt.ylabel("Số lượng giao dịch")
+plt.tight_layout()
+plt.show()
+
+print("\n=== HOÀN TẤT PHẦN 1 - EDA ===")
+
+
+# =========================================================
+# PHẦN 2 - NGƯỜI 2: RFM + FEATURE ENGINEERING
+# =========================================================
+
+print("\n" + "=" * 70)
+print("PHẦN 2 - NGƯỜI 2: RFM + FEATURE ENGINEERING")
+print("=" * 70)
+
+try:
+    conn = pyodbc.connect(conn_str)
+
+    query_rfm = """
+    SELECT *
+    FROM Customer_RFM_Final;
+    """
+
+    df_rfm = pd.read_sql(query_rfm, conn)
+    conn.close()
+
+    print("\n[1] Đọc bảng Customer_RFM_Final thành công")
+    print("Số dòng:", df_rfm.shape[0])
+    print("Số cột:", df_rfm.shape[1])
+    print(df_rfm.head())
+
+except Exception as e:
+    print("Lỗi khi đọc bảng Customer_RFM_Final:", e)
+    print("Kiểm tra lại xem bảng Customer_RFM_Final đã được tạo trong SQL chưa.")
+    exit()
+
+
+# ---------------------------------------------------------
+# 2.1. Kiểm tra dữ liệu
+# ---------------------------------------------------------
+
+print("\n[2] Kiểm tra missing values:")
+print(df_rfm.isnull().sum())
+
+print("\n[3] Thống kê mô tả:")
+print(df_rfm.describe())
+
+if "RFM_Level" in df_rfm.columns:
+    print("\n[4] Phân bố nhóm RFM:")
+    print(df_rfm["RFM_Level"].value_counts())
+
+print("\n[5] Phân bố Frequency:")
+print(df_rfm["Frequency"].value_counts().sort_index())
+
+
+# ---------------------------------------------------------
+# 2.2. Min-Max Scaling cho bảng RFM
+# ---------------------------------------------------------
+
+features_to_scale = [
+    "Recency",
+    "Frequency",
+    "Monetary_CLV",
+    "Avg_Order_Value",
+    "Total_Quantity",
+    "Avg_Quantity",
+    "Customer_Lifespan",
+    "RFM_Total_Score"
+]
+
+if "Discount_Usage_Rate" in df_rfm.columns:
+    features_to_scale.append("Discount_Usage_Rate")
+
+missing_scale_cols = [col for col in features_to_scale if col not in df_rfm.columns]
+
+if missing_scale_cols:
+    print("Thiếu các cột cần scale:", missing_scale_cols)
+else:
+    df_scaled = df_rfm.copy()
+
+    scaler_rfm = MinMaxScaler()
+    df_scaled[features_to_scale] = scaler_rfm.fit_transform(df_rfm[features_to_scale])
+
+    # Đảo chiều Recency để giá trị càng cao nghĩa là khách mua càng gần đây
+    df_scaled["Recency"] = 1 - df_scaled["Recency"]
+
+    print("\n[6] Đã chuẩn hóa Min-Max Scaling cho RFM")
+    print(df_scaled[features_to_scale].head())
+
+
+# ---------------------------------------------------------
+# 2.3. Biểu đồ RFM 1: Frequency
+# ---------------------------------------------------------
+
+plt.figure(figsize=(8, 4))
+sns.histplot(df_rfm["Frequency"], bins=10)
+plt.title("Phân bố tần suất mua hàng", fontsize=14, fontweight="bold")
+plt.xlabel("Frequency")
+plt.ylabel("Số lượng khách hàng")
+plt.tight_layout()
+plt.show()
+
+
+# ---------------------------------------------------------
+# 2.4. Biểu đồ RFM 2: Recency
+# ---------------------------------------------------------
+
+plt.figure(figsize=(8, 4))
+sns.histplot(df_rfm["Recency"], bins=20)
+plt.title("Phân bố Recency của khách hàng", fontsize=14, fontweight="bold")
+plt.xlabel("Recency - số ngày từ lần mua gần nhất")
+plt.ylabel("Số lượng khách hàng")
+plt.tight_layout()
+plt.show()
+
+
+# ---------------------------------------------------------
+# 2.5. Biểu đồ RFM 3: Monetary CLV
+# ---------------------------------------------------------
+
+plt.figure(figsize=(8, 4))
+sns.boxplot(x=df_rfm["Monetary_CLV"])
+plt.title("Boxplot của Monetary CLV", fontsize=14, fontweight="bold")
+plt.xlabel("Monetary CLV")
+plt.tight_layout()
+plt.show()
+
+
+# ---------------------------------------------------------
+# 2.6. Biểu đồ RFM 4: RFM Level
+# ---------------------------------------------------------
+
+if "RFM_Level" in df_rfm.columns:
+    plt.figure(figsize=(7, 4))
+    sns.countplot(
+        x="RFM_Level",
+        data=df_rfm,
+        order=["High Value", "Medium Value", "Low Value"]
+    )
+    plt.title("Phân bố khách hàng theo nhóm RFM", fontsize=14, fontweight="bold")
+    plt.xlabel("Nhóm RFM")
+    plt.ylabel("Số lượng khách hàng")
+    plt.tight_layout()
+    plt.show()
+
+
+# ---------------------------------------------------------
+# 2.7. Biểu đồ RFM 5: Heatmap tương quan
+# ---------------------------------------------------------
+
+corr_cols = [
+    "Recency",
+    "Frequency",
+    "Monetary_CLV",
+    "Avg_Order_Value",
+    "Total_Quantity",
+    "Avg_Quantity",
+    "Customer_Lifespan",
+    "RFM_Total_Score"
+]
+
+if "Discount_Usage_Rate" in df_rfm.columns:
+    corr_cols.append("Discount_Usage_Rate")
+
+existing_corr_cols = [col for col in corr_cols if col in df_rfm.columns]
+
+plt.figure(figsize=(10, 7))
+sns.heatmap(
+    df_rfm[existing_corr_cols].corr(),
+    annot=True,
+    cmap="coolwarm",
+    fmt=".2f"
+)
+plt.title("Ma trận tương quan giữa RFM và các đặc trưng mở rộng", fontsize=14, fontweight="bold")
+plt.tight_layout()
+plt.show()
+
+print("\n=== HOÀN TẤT PHẦN 2 - RFM + FEATURE ENGINEERING ===")
+
+
+# =========================================================
+# PHẦN 3 - NGƯỜI 3: CLUSTERING + MACHINE LEARNING
+# =========================================================
+
+print("\n" + "=" * 70)
+print("PHẦN 3 - NGƯỜI 3: CLUSTERING + MACHINE LEARNING")
+print("=" * 70)
+
+df_ml = df_rfm.copy()
+
+
+# ---------------------------------------------------------
+# 3.1. Scaling cho K-Means
+# ---------------------------------------------------------
+
+cluster_features = [
+    "Recency",
+    "Frequency",
+    "Avg_Quantity",
+    "Customer_Lifespan"
+]
+
+if "Discount_Usage_Rate" in df_ml.columns:
+    cluster_features.append("Discount_Usage_Rate")
+
+missing_cluster_cols = [col for col in cluster_features if col not in df_ml.columns]
+
+if missing_cluster_cols:
+    print("Thiếu các cột dùng cho clustering:", missing_cluster_cols)
+    exit()
+
+scaler_cluster = MinMaxScaler()
+X_cluster_scaled = scaler_cluster.fit_transform(df_ml[cluster_features])
+
+print("\n[1] Đã scale dữ liệu cho K-Means.")
+print("Các feature dùng cho clustering:", cluster_features)
+
+
+# ---------------------------------------------------------
+# 3.2. K-Means Clustering
+# ---------------------------------------------------------
+
+kmeans = KMeans(
+    n_clusters=3,
+    random_state=42,
+    n_init=10
+)
+
+df_ml["ML_Cluster"] = kmeans.fit_predict(X_cluster_scaled)
+
+print("\n[2] Đã tạo nhãn ML_Cluster.")
+print("Phân bố số khách hàng theo cụm:")
+print(df_ml["ML_Cluster"].value_counts().sort_index())
+
+
+# ---------------------------------------------------------
+# 3.3. Chuẩn bị dữ liệu cho mô hình ML
+# ---------------------------------------------------------
+
+drop_cols = [
+    "CustomerID",
+    "Customer_ID",
+    "Monetary_CLV",
+    "RFM_Total_Score",
+    "RFM_Level",
+    "RFM_Code",
+    "R_Score",
+    "F_Score",
+    "M_Score",
+    "Avg_Order_Value",
+    "Total_Quantity"
+]
+
+df_model = df_ml.copy()
+
+df_model = pd.get_dummies(
+    df_model,
+    columns=["ML_Cluster"],
+    drop_first=True
+)
+
+X = df_model.drop(columns=[col for col in drop_cols if col in df_model.columns])
+X = X.select_dtypes(exclude=["object", "string"])
+
+if "Monetary_CLV" not in df_model.columns:
+    print("Không tìm thấy cột Monetary_CLV trong dữ liệu.")
+    exit()
+
+y = df_model["Monetary_CLV"]
+y_log = np.log1p(y)
+
+print("\n[3] Các feature được dùng để train model:")
+print(list(X.columns))
+print("Số lượng feature đầu vào:", X.shape[1])
+
+
+# ---------------------------------------------------------
+# 3.4. Train/Test Split và Scaling
+# ---------------------------------------------------------
+
+X_train, X_test, y_train_log, y_test_log = train_test_split(
+    X,
+    y_log,
+    test_size=0.2,
+    random_state=42
+)
+
+scaler_final = MinMaxScaler()
+X_train_scaled = scaler_final.fit_transform(X_train)
+X_test_scaled = scaler_final.transform(X_test)
+
+print("\n[4] Đã chia train/test và scale dữ liệu đúng cách.")
+print(f"Train size: {X_train_scaled.shape[0]} mẫu")
+print(f"Test size: {X_test_scaled.shape[0]} mẫu")
+
+
+# ---------------------------------------------------------
+# 3.5. Khởi tạo mô hình
+# ---------------------------------------------------------
+
+models = {
+    "1. Random Forest": RandomForestRegressor(
+        n_estimators=100,
+        max_depth=6,
+        random_state=42
+    ),
+
+    "2. Gradient Boosting": GradientBoostingRegressor(
+        n_estimators=100,
+        max_depth=4,
+        random_state=42
+    ),
+
+    "3. Extra Trees": ExtraTreesRegressor(
+        n_estimators=200,
+        max_depth=8,
+        random_state=42
+    ),
+
+    "4. Linear Regression": LinearRegression()
+}
+
+results = []
+
+
+# ---------------------------------------------------------
+# 3.6. Train model + Evaluation
+# ---------------------------------------------------------
+
+fig, axes = plt.subplots(1, 4, figsize=(24, 6))
+
+fig.suptitle(
+    "CLV thực tế và CLV dự đoán",
+    fontsize=16,
+    fontweight="bold",
+    y=1.05
+)
+
+for idx, (name, model) in enumerate(models.items()):
+    model.fit(X_train_scaled, y_train_log)
+
+    y_pred_log = model.predict(X_test_scaled)
+
+    y_pred_real = np.expm1(y_pred_log)
+    y_test_real = np.expm1(y_test_log)
+
+    r2 = r2_score(y_test_real, y_pred_real)
+    mae = mean_absolute_error(y_test_real, y_pred_real)
+    rmse = np.sqrt(mean_squared_error(y_test_real, y_pred_real))
+
+    results.append({
+        "Model": name,
+        "R-squared": round(r2, 4),
+        "RMSE ($)": round(rmse, 2),
+        "MAE ($)": round(mae, 2)
+    })
+
+    ax = axes[idx]
+
+    ax.scatter(
+        y_test_real,
+        y_pred_real,
+        alpha=0.6,
+        color="teal",
+        edgecolor="white",
+        s=50
+    )
+
+    max_val = max(max(y_test_real), max(y_pred_real))
+
+    ax.plot(
+        [0, max_val],
+        [0, max_val],
+        color="crimson",
+        linestyle="--",
+        linewidth=2,
+        label="Đường lý tưởng"
+    )
+
+    ax.set_title(
+        f"{name}\nR-squared: {r2:.4f}",
+        fontsize=13,
+        fontweight="bold",
+        color="darkblue"
+    )
+
+    ax.set_xlabel("CLV thực tế ($)")
+    ax.set_ylabel("CLV dự đoán ($)")
+    ax.legend()
+    ax.grid(True, linestyle=":", alpha=0.7)
+
+
+results_df = pd.DataFrame(results).sort_values(
+    by="R-squared",
+    ascending=False
+).reset_index(drop=True)
+
+print("\n" + "=" * 70)
+print("BẢNG TỔNG KẾT SAI SỐ CÁC MÔ HÌNH")
+print("=" * 70)
+print(results_df.to_string(index=False))
+print("=" * 70)
+
+best_model = results_df.iloc[0]
+
+print("\nMô hình tốt nhất:")
+print(f"- {best_model['Model']}")
+print(f"- R-squared: {best_model['R-squared']}")
+print(f"- RMSE ($): {best_model['RMSE ($)']}")
+print(f"- MAE ($): {best_model['MAE ($)']}")
+
+plt.tight_layout()
+plt.show()
+
+print("\n=== HOÀN TẤT TOÀN BỘ PIPELINE CLV ===")

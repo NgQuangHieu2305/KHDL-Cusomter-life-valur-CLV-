@@ -1,0 +1,5 @@
+﻿Model,R-squared,RMSE ($),MAE ($)
+Extra Trees - Tuned,0.5046,912.47,683.91
+Random Forest - Tuned,0.4977,918.75,688.88
+Gradient Boosting - Tuned,0.4881,927.54,693.16
+Linear Regression,0.391,1011.69,732.48
